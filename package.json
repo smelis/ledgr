@@ -1,0 +1,25 @@
+{
+    "name": "my-electron-app",
+    "version": "0.1.0",
+    "author": "your name",
+    "description": "My Electron app",
+    "main": "main.js",
+    "scripts": {
+        "start": "electron ."
+    },
+    "dependencies": {
+        "d3-scale": "^3.2.3",
+        "d3-scale-chromatic": "^2.0.0",
+        "electron": "^11.1.1",
+        "ngraph.centrality": "^2.0.1",
+        "ngraph.cw": "^2.0.0",
+        "ngraph.graph": "^19.1.0",
+        "ngraph.hits": "^2.0.0",
+        "ngraph.louvain": "^2.0.0",
+        "ngraph.pagerank": "^2.0.0",
+        "ngraph.slpa": "^0.1.0",
+        "rippled-ws-client": "^1.6.3",
+        "stellar-sdk": "^7.0.0",
+        "web3": "^1.3.1"
+    }
+}

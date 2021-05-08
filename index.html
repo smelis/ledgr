@@ -1,0 +1,546 @@
+<head>
+    <style>
+        body {
+            margin: 0;
+        }
+    </style>
+
+    <script src="https://unpkg.com/3d-force-graph"></script>
+    <script src="https://unpkg.com/dat.gui"></script>
+    <!-- <script src="https://unpkg.com/neo4j-driver"></script> -->
+    <!-- <script src="index.js"></script> -->
+    <!--<script src="../../dist/3d-force-graph.js"></script>-->
+</head>
+
+<body>
+    <div id="3d-graph"></div>
+
+    <script>
+
+        const Web3 = require('web3');
+        const StellarSdk = require('stellar-sdk')
+
+        const scaleOrdinal = require('d3-scale')
+        const schemePaired = require('d3-scale-chromatic')
+
+        const louvainClusters = require('ngraph.louvain')
+        const slpaClusters = require('ngraph.slpa')
+        const chineseWhispersClusters = require('ngraph.cw')
+        const hitsClusters = require('ngraph.hits');
+        const centrality = require('ngraph.centrality')
+        const createGraph = require('ngraph.graph')
+        const pagerank = require('ngraph.pagerank')
+
+        const client = require('rippled-ws-client')
+
+        const g = createGraph()
+        const subg = createGraph()
+        const initData = { nodes: [], links: [] }
+
+        const clusterings = [{ name: 'chinese whispers', field: 'cw' }, { name: 'louvain', field: 'louvain' }, { name: 'slpa', field: 'slpa' }];
+        let colorScales = [];
+        clusterings.forEach((o) => {
+            colorScales.push({ name: o.name, field: o.field, scale: scaleOrdinal.scaleOrdinal(schemePaired.schemePaired) })
+        })
+
+        let batch = [];
+
+        const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
+            .graphData(initData)
+            .nodeLabel(node => `${node.id}`)
+            .linkDirectionalParticleSpeed(0.03)
+            .linkDirectionalParticleColor(() => 'red')
+            .linkDirectionalParticleWidth(5)
+            // .linkDirectionalArrowLength(3.5)
+            // .linkDirectionalArrowRelPos(1)
+            // .linkCurvature(0.25)
+            .linkWidth('data')
+            .nodeVal('nodeSize')
+            .nodeColor(node => {
+                let color = null
+                for (i = 0; i < colorScales.length - 1; i++) {
+                    if (colorScales[i].name === nodeColorSettings.color) {
+                        color = colorScales[i].scale((node[colorScales[i].field]))
+                        break;
+                    }
+                }
+                return color
+            })
+            .onNodeClick(node => {
+
+                window.open("https://xrpscan.com/account/" + node.id, "", "");
+                // Aim at node from outside it
+                const distance = 40;
+                const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
+
+                Graph.cameraPosition(
+                    { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio }, // new position
+                    node, // lookAt ({ x, y, z })
+                    1000  // ms transition duration
+                );
+            });
+
+        g.on('changed', function (changes) {
+            var topConnectedNodes = topNConnectedComponents(g, clusterSettings.topClusters, clusterSettings.minClusterSize)
+
+            subg.beginUpdate()
+            g.forEachLink(function (link) {
+                if (topConnectedNodes.includes(link.fromId) || topConnectedNodes.includes(link.toId)) {
+                    if (!subg.hasLink(link.fromId, link.toId)) {
+                        console.log('add link to subg from ' + link.fromId + ' to ' + link.toId)
+                        subg.addLink(link.fromId, link.toId, link.data)
+                    }
+                } else {
+                    if (subg.hasLink(link.fromId, link.toId)) {
+                        console.log('remove link from subg from ' + link.fromId + ' to ' + link.toId)
+                        subg.removeLink(subg.getLink(link.fromId, link.toId))
+                    }
+                }
+            })
+            g.forEachNode(function (node) {
+                if (!topConnectedNodes.includes(node.id) && subg.hasNode(node.id)) {
+                    console.log('remove node from subg ' + node.id)
+                    subg.removeNode(node.id);
+                } else if (topConnectedNodes.includes(node.id) && !subg.hasNode(node.id)) {
+                    console.log('add node to subg ' + node.id)
+                    subg.addNode(node.id);
+                }
+            })
+            subg.endUpdate()
+        });
+
+        subg.on('changed', function (changes) {
+
+            var size = [];
+            if (nodeSizeSettings.size === 'pagerank') {
+                size = pagerank(subg)
+            } else if (nodeSizeSettings.size === 'betweenness') {
+                size = centrality.betweenness(subg);
+            } else if (nodeSizeSettings.size === 'closeness') {
+                size = centrality.closeness(subg);
+            } else if (nodeSizeSettings.size === 'eccentricity') {
+                size = centrality.eccentricity(subg);
+            } else if (nodeSizeSettings.size === 'degree') {
+                size = centrality.degree(subg);
+            } else if (nodeSizeSettings.size === 'hits.authority') {
+                size = hits(subg, 'authority');
+            } else if (nodeSizeSettings.size === 'hits.hub') {
+                size = hits(subg, 'hub');
+            }
+
+            var color = [];
+            if (nodeColorSettings.color === 'chinese whispers') {
+                color = chineseWhispers(subg);
+            } else if (nodeColorSettings.color === 'louvain') {
+                color = louvain(subg);
+            } else if (nodeColorSettings.color === 'slpa') {
+                color = slpa(subg);
+            }
+
+            let { nodes, links } = Graph.graphData();
+
+            changes.forEach(change => {
+                if (change.changeType === 'add') {
+                    if (change.node) {
+                        nodes.push({ id: change.node.id })
+                    } else if (change.link) {
+                        links.push({ source: change.link.fromId, target: change.link.toId, data: change.link.data })
+                    }
+                } else if (change.changeType === 'remove') {
+                    if (change.link) {
+                        links = links.filter(function (e) {
+                            var result = e.source.id === change.link.fromId && e.target.id === change.link.toId;
+                            return !result;
+                        });
+                    } else {
+                        for (i = 0; i < nodes.length; i++) {
+                            if (nodes[i].id === change.node.id) {
+                                nodes.splice(i, 1);
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+
+            links.forEach((l, idx) => {
+                l.idx = idx;
+            });
+
+            let [min, max] = Object.values(size).reduce(([prevMin, prevMax], curr) =>
+                [Math.min(prevMin, curr), Math.max(prevMax, curr)], [Infinity, -Infinity]);
+
+            nodes.forEach((n, idx) => {
+                n.idx = idx;
+                var normalized = normalize(size[n.id], max, min);
+                if (normalized < 0.25) {
+                    normalized = 0.2 + normalized;
+                } else if (normalized < 0.5) {
+                    normalized = 0.2 + normalized;
+                } else if (normalized < 0.75) {
+                    normalized = 0.2 + normalized * 2;
+                } else {
+                    normalized = 0.2 + normalized * 4;
+                }
+                n.nodeSize = normalized;
+
+                if (nodeColorSettings.color === 'chinese whispers') {
+                    n.cw = color[n.id]
+                } else if (nodeColorSettings.color === 'louvain') {
+                    n.louvain = color[n.id]
+                } else if (nodeColorSettings.color === 'slpa') {
+                    n.slpa = color[n.id]
+                }
+
+            });
+
+            Graph.graphData({ nodes, links });
+
+        })
+
+        const ClusterSettings = function () {
+            this.topClusters = 2;
+            this.minClusterSize = 2;
+        };
+
+        const StreamSettings = function () {
+            this.source = 'xrp';
+            this.stream = false;
+            this.batch = 5;
+        };
+
+        const NodeColorSettings = function () {
+            this.color = 'degree';
+        }
+
+        const NodeSizeSettings = function () {
+            this.size = 'pagerank';
+        }
+
+        const clusterSettings = new ClusterSettings();
+        const streamSettings = new StreamSettings();
+        const nodeColorSettings = new NodeColorSettings();
+        const nodeSizeSettings = new NodeSizeSettings();
+
+        const gui = new dat.GUI();
+
+        gui.add(clusterSettings, 'topClusters', 1, 100, 1);
+        gui.add(clusterSettings, 'minClusterSize', 2, 100, 1);
+
+        const streamController = gui.add(streamSettings, 'stream');
+        streamController.onChange(updateStream);
+        gui.add(streamSettings, 'batch')
+        let streamSourceCombobox = gui.add(streamSettings, 'source', ['xrp', 'xlm', 'btc']);
+        streamSourceCombobox.setValue('xrp')
+        streamSourceCombobox.onChange(updateSource)
+
+        let nodeColorCombobox = gui.add(nodeColorSettings, 'color', ['chinese whispers', 'louvain', 'slpa']);
+        nodeColorCombobox.setValue("chinese whispers");
+
+        let nodeSizeCombobox = gui.add(nodeSizeSettings, 'size', ['degree', 'betweenness', 'closeness', 'eccentricity', 'pagerank', 'hits.authority', 'hits.hub']);
+        nodeSizeCombobox.setValue("pagerank");
+
+        function updateSource() {
+            Graph.pauseAnimation();
+            g.clear();
+            subg.clear();
+            Graph.graphData({ nodes: [], links: [] });
+            Graph.d3ReheatSimulation();
+            Graph.refresh();
+            Graph.resumeAnimation();
+            if (streamSettings.source === 'xrp' && eventSourceClose) {
+                eventSourceClose();
+            } else if (streamSettings.source === 'xlm' && xrpSocket) {
+                xrpSocket.send({
+                    command: 'subscribe',
+                    streams: ['transactions']
+                }).then((r) => {
+                    console.log('subscribe Response', r)
+                }).catch((e) => {
+                    console.log('subscribe Catch', e)
+                })
+            } 
+        }
+
+        let latestKnownBlockNumber = -1;
+        let blockTime = 5000;
+        const web3 = new Web3('https://cloudflare-eth.com');
+
+        let xrpSocket = null
+        let eventSourceClose = null
+        let stellarServer = new StellarSdk.Server('https://horizon.stellar.org')
+        let btcSocket = null
+
+        function updateStream() {
+            stream = streamSettings.stream;
+            if (stream) {
+                if (streamSettings.source === 'xrp') {
+                    new client('wss://fh.xrpl.ws').then(connection => {
+                        xrpSocket = connection;
+                        xrpSocket.on('transaction', (transaction) => {
+                            if (streamSettings.stream && transaction.transaction.TransactionType === 'Payment' &&
+                                transaction.transaction.Account && transaction.transaction.Destination) {
+                                let link = g.getLink(transaction.transaction.Account, transaction.transaction.Destination)
+                                if (!link) {
+                                    batch.push({ from: transaction.transaction.Account, to: transaction.transaction.Destination, created: new Date(), weight: 1 })
+                                }
+                                if (batch.length >= streamSettings.batch) {
+                                    g.beginUpdate()
+                                    batch.forEach((l) => {
+                                        g.addLink(l.from, l.to, l.weight)
+                                    })
+                                    batch = []
+                                    g.endUpdate()
+                                }
+                            }
+                        })
+
+                        xrpSocket.send({
+                            command: 'subscribe',
+                            streams: ['transactions']
+                        }).then((r) => {
+                            console.log('subscribe Response', r)
+                        }).catch((e) => {
+                            console.log('subscribe Catch', e)
+                        })
+                    })
+                } else if (streamSettings.source === 'xlm') {
+                    eventSourceClose = stellarServer.payments()
+                        .cursor('now')
+                        .stream({
+                            onmessage: function (message) {
+                                if (message.from && message.to) {
+                                    let link = g.getLink(message.from, message.to)
+                                    if (!link) {
+                                        batch.push({ from: message.from, to: message.to, created: new Date(), weight: 1 })
+                                    }
+                                }
+                                if (batch.length >= streamSettings.batch) {
+                                    g.beginUpdate()
+                                    batch.forEach((l) => {
+                                        g.addLink(l.from, l.to, l.weight)
+                                    })
+                                    batch = []
+                                    g.endUpdate()
+                                }
+                            }
+                        })
+                } else if (streamSettings.source === 'btc') {
+                    btcSocket = new WebSocket("wss://ws.blockchain.info/inv")
+                    btcSocket.onopen = function () {
+                        btcSocket.send('{ "op": "unconfirmed_sub" }');
+                    };
+                    btcSocket.onmessage = function (event) {
+                        var msgData = JSON.parse(event.data);
+                        if (msgData.op == 'utx') {
+                            if (msgData.x.inputs.length > 0 && msgData.x.out.length > 0) {
+                                for (i = 0; i < msgData.x.inputs.length; i++) {
+                                    if (msgData.x.inputs[i] && msgData.x.inputs[i].prev_out && msgData.x.inputs[i].prev_out.addr) {
+                                        for (j = 0; j < msgData.x.out.length; j++) {
+                                            if (msgData.x.out[j] && msgData.x.out[j].addr) {
+                                                let link = g.getLink(msgData.x.inputs[i].prev_out.addr, msgData.x.out[j].addr)
+                                                if (!link) {
+                                                    batch.push({ from: msgData.x.inputs[i].prev_out.addr, to: msgData.x.out[j].addr, created: new Date(), weight: 1 })
+                                                }
+                                                if (batch.length >= streamSettings.batch) {
+                                                    g.beginUpdate()
+                                                    batch.forEach((l) => {
+                                                        g.addLink(l.from, l.to, l.weight)
+                                                    })
+                                                    batch = []
+                                                    g.endUpdate()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                console.log(msgData.x)
+                            }
+                        }
+                    }
+                } else if (streamSettings.source === 'eth') {
+                    while (streamSettings.source === 'eth') {
+                        checkCurrentBlock()
+                    }
+                }
+            } else {
+                if (streamSettings.source === 'xrp' && socket) {
+                    socket.send({
+                        command: 'unsubscribe',
+                        streams: ['transactions']
+                    }).then((r) => {
+                        console.log('subscribe Response', r)
+                    }).catch((e) => {
+                        console.log('subscribe Catch', e)
+                    })
+                } else if (streamSettings.source === 'xlm' && es) {
+                    eventSourceClose()
+                } else if (streamSettings.source === 'btc' && btcSocket) {
+                    btcSocket.send('{ "op": "unconfirmed_unsub" }');
+                    btcSocket.close()
+                } else if (streamSettings.source === 'eth' && eth) {
+                    // btcSocket.send('{ "op": "unconfirmed_unsub" }');
+                    // btcSocket.close()
+                }
+            }
+        }
+
+        async function processBlock(blockNumber) {
+            console.log("We process block: " + blockNumber);
+            let block = await web3.eth.getBlock(blockNumber);
+            console.log("new block :", block)
+            for (const transactionHash of block.transactions) {
+                let transaction = await web3.eth.getTransaction(transactionHash);
+                let transactionReceipt = await web3.eth.getTransactionReceipt(transactionHash);
+                transaction = Object.assign(transaction, transactionReceipt);
+                console.log("Transaction: ", transaction);
+                // Do whatever you want here
+            }
+            latestKnownBlockNumber = blockNumber;
+        }
+
+        async function checkCurrentBlock() {
+            const currentBlockNumber = await web3.eth.getBlockNumber()
+            console.log("Current blockchain top: " + currentBlockNumber, " | Script is at: " + latestKnownBlockNumber);
+            while (latestKnownBlockNumber == -1 || currentBlockNumber > latestKnownBlockNumber) {
+                await processBlock(latestKnownBlockNumber == -1 ? currentBlockNumber : latestKnownBlockNumber + 1);
+            }
+            setTimeout(checkCurrentBlock, blockTime);
+        }
+
+        function findConnectedComponents(graph) {
+            var nodeIdToComponentId = new Map();
+
+            var connectedComponents = [];
+            var lastComponentId = 0;
+
+            graph.forEachNode(function (node) {
+                if (nodeIdToComponentId.has(node.id)) {
+                    // we already seen this cluster. Ignore it.
+                    return;
+                }
+
+                // We found a new connected component:
+                nodeIdToComponentId.set(node.id, lastComponentId);
+                var currentComponent = [node.id];
+                connectedComponents.push(currentComponent);
+
+                // Let's find what other nodes belong to this component
+                dfs(graph, node.id, otherNode => {
+                    let componentId = nodeIdToComponentId.get(otherNode.id);
+                    if (componentId !== undefined && componentId === lastComponentId) {
+                        // this is possible when we have a loop. Just ignore the node.
+                        return false;
+                    } else if (componentId !== undefined) {
+                        throw new Error('Reached a component from another component. DFS is broken?');
+                    }
+
+                    currentComponent.push(otherNode.id);
+                    nodeIdToComponentId.set(otherNode.id, lastComponentId);
+
+                    return true; // let's visit neighbors
+                });
+
+                lastComponentId += 1;
+            });
+
+            return connectedComponents;
+        };
+
+        function dfs(graph, startFromNodeId, visitor) {
+            graph.forEachLinkedNode(startFromNodeId, function (otherNode) {
+                if (visitor(otherNode)) dfs(graph, otherNode.id, visitor);
+            });
+        }
+
+        function topNConnectedComponents(graph, n, min) {
+            // console.log("begin cc");
+
+            var components = findConnectedComponents(graph);
+            // console.log("cc:" + components.length);
+
+            var topN = components.sort(function (a, b) {
+                return b.length - a.length
+            });
+            topN.splice(n, topN.length - n);
+            // console.log("cc after topN:" + topN.length);
+
+            topN = topN.filter((component) => {
+                return component.length >= min;
+            });
+            // console.log("cc after min:" + components.length);
+
+            var merged = [];
+            if (topN.length > 0) {
+                merged = topN[0];
+                for (i = 1; i < n && topN.length - 1 >= i; i++) {
+                    merged = merged.concat(topN[i]);
+                }
+            }
+            // console.log("cc return:" + merged.length);
+            // console.log(merged);
+            // console.log("end cc");
+
+            return merged;
+        }
+
+        function normalize(val, max, min) {
+            return (val - min) / (max - min);
+        }
+
+        function chineseWhispers(graph) {
+            var whisper = chineseWhispersClusters(graph);
+
+            var requiredChangeRate = 0; // 0 is complete convergence
+            while (whisper.getChangeRate() > requiredChangeRate) {
+                whisper.step();
+            }
+
+            var result = Object.create(null);
+            whisper.forEachCluster((val, key) => {
+                val.nodes.forEach((n) => {
+                    result[n] = val.class;
+                })
+            })
+
+            return result;
+        }
+
+        function louvain(graph) {
+            var clusters = louvainClusters(graph);
+            var result = Object.create(null);
+            graph.forEachNode((n) => {
+                result[n.id] = clusters.getClass(n.id)
+            })
+            return result;
+        }
+
+        function slpa(graph) {
+            var clusters = slpaClusters(graph);
+            var result = Object.create(null)
+            graph.forEachNode((n) => {
+                var communities = clusters.nodes[n.id];
+                result[n.id] = communities.sort(function (a, b) {
+                    return a.probability - b.probability
+                })[0].name;
+            })
+            return result;
+        }
+
+        function hits(graph, authOrHub) {
+            var clusters = hitsClusters(graph)
+            var result = Object.create(null);
+            graph.forEachNode((n) => {
+                if (authOrHub === 'authority') {
+                    result[n.id] = clusters[n.id].authority
+                } else {
+                    result[n.id] = clusters[n.id].hub
+                }
+            })
+            return result;
+        }
+
+
+    </script>
+</body>
